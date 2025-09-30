@@ -374,61 +374,70 @@ class FantiaDownloader:
             self.output("URL already downloaded. Skipping...\n")
             return
 
-        request = self.session.get(url, stream=True)
-        if request.status_code == 404:
-            self.output("Download URL returned 404. Skipping...\n")
-            return
-        request.raise_for_status()
+        for attempt in range(3):
+            try:
+                request = self.session.get(url, stream=True, timeout=(30, 60))
+                if request.status_code == 404:
+                    self.output("Download URL returned 404. Skipping...\n")
+                    return
+                request.raise_for_status()
 
-        # Handle redirects so we can properly catch an excluded filename
-        # Attachments typically route from fantia.jp/posts/#/download/#
-        # Images typically are served directly from cc.fantia.jp
-        # Metadata images typically are served from c.fantia.jp
-        if request.url != url:
-            url_path = unquote(request.url.split("?", 1)[0])
-            server_filename = os.path.basename(url_path)
-            if server_filename in self.exclusions:
-                self.output("Server filename in exclusion list (skipping): {}\n".format(server_filename))
-                return
-            if use_server_filename:
-                filepath = os.path.join(os.path.dirname(filepath), server_filename)
+                # Handle redirects so we can properly catch an excluded filename
+                # Attachments typically route from fantia.jp/posts/#/download/#
+                # Images typically are served directly from cc.fantia.jp
+                # Metadata images typically are served from c.fantia.jp
+                if request.url != url:
+                    url_path = unquote(request.url.split("?", 1)[0])
+                    server_filename = os.path.basename(url_path)
+                    if server_filename in self.exclusions:
+                        self.output("Server filename in exclusion list (skipping): {}\n".format(server_filename))
+                        return
+                    if use_server_filename:
+                        filepath = os.path.join(os.path.dirname(filepath), server_filename)
 
-        if not use_server_filename and append_server_extension:
-            filepath += guess_extension(request.headers["Content-Type"], url)
+                if not use_server_filename and append_server_extension:
+                    filepath += guess_extension(request.headers["Content-Type"], url)
 
-        file_size = int(request.headers["Content-Length"])
-        if os.path.isfile(filepath) and os.stat(filepath).st_size == file_size:
-            self.output("File found (skipping): {}\n".format(filepath))
-            self.db.insert_url(url_path)
-            return
+                file_size = int(request.headers["Content-Length"])
+                if os.path.isfile(filepath) and os.stat(filepath).st_size == file_size:
+                    self.output("File found (skipping): {}\n".format(filepath))
+                    self.db.insert_url(url_path)
+                    return
 
-        self.output("File: {}\n".format(filepath))
-        incomplete_filename = filepath + ".part"
+                self.output("File: {}\n".format(filepath))
+                incomplete_filename = filepath + ".part"
 
-        downloaded = 0
-        with open(incomplete_filename, "wb") as file:
-            for chunk in request.iter_content(self.chunk_size):
-                downloaded += len(chunk)
-                file.write(chunk)
-                done = int(25 * downloaded / file_size)
-                percent = int(100 * downloaded / file_size)
-                self.output("\r|{0}{1}| {2}% ".format("\u2588" * done, " " * (25 - done), percent))
-        self.output("\n")
+                downloaded = 0
+                with open(incomplete_filename, "wb") as file:
+                    for chunk in request.iter_content(self.chunk_size):
+                        downloaded += len(chunk)
+                        file.write(chunk)
+                        done = int(25 * downloaded / file_size)
+                        percent = int(100 * downloaded / file_size)
+                        self.output("\r|{0}{1}| {2}% ".format("\u2588" * done, " " * (25 - done), percent))
+                self.output("\n")
 
-        if downloaded != file_size:
-            raise Exception("Downloaded file size mismatch (expected {}, got {})".format(file_size, downloaded))
+                if downloaded != file_size:
+                    raise Exception("Downloaded file size mismatch (expected {}, got {})".format(file_size, downloaded))
 
-        if os.path.exists(filepath):
-            os.remove(filepath)
-        os.rename(incomplete_filename, filepath)
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                os.rename(incomplete_filename, filepath)
 
-        self.db.insert_url(url_path)
+                self.db.insert_url(url_path)
 
-        modification_time_string = request.headers["Last-Modified"]
-        modification_time = int(dt.strptime(modification_time_string, "%a, %d %b %Y %H:%M:%S %Z").timestamp())
-        if modification_time:
-            access_time = int(time.time())
-            os.utime(filepath, times=(access_time, modification_time))
+                modification_time_string = request.headers["Last-Modified"]
+                modification_time = int(dt.strptime(modification_time_string, "%a, %d %b %Y %H:%M:%S %Z").timestamp())
+                if modification_time:
+                    access_time = int(time.time())
+                    os.utime(filepath, times=(access_time, modification_time))
+                
+                break # Break out of the retry loop if the download is successful
+            except requests.exceptions.RequestException as e:
+                self.output(f"\nDownload failed on attempt {attempt + 1}/3: {e}\n")
+                if attempt == 2:
+                    self.output("All retry attempts failed. Skipping file...\n")
+                    return
 
     def download_photo(self, photo_url, photo_counter, gallery_directory):
         """Download a photo to the post's directory."""
