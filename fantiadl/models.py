@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import random
+import time
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter, Retry
 import requests
@@ -17,7 +19,6 @@ import mimetypes
 import os
 import re
 import sys
-import time
 import traceback
 
 from .__version__ import __version__
@@ -104,7 +105,10 @@ class FantiaDownloader:
         """Initialize session with necessary headers and config."""
 
         self.session = requests.session()
-        self.session.headers.update({"User-Agent": USER_AGENT})
+        self.session.headers.update({
+            "User-Agent": USER_AGENT,
+            "Referer": BASE_URL
+        })
         retries = Retry(
             total=5,
             connect=5,
@@ -231,6 +235,7 @@ class FantiaDownloader:
         for post_id in post_ids if limit == 0 else post_ids[:limit]:
             try:
                 self.download_post(post_id)
+                time.sleep(random.uniform(1, 3))
             except KeyboardInterrupt:
                 raise
             except:
@@ -251,6 +256,7 @@ class FantiaDownloader:
             try:
                 fanclub = FantiaClub(fanclub_id)
                 self.download_fanclub(fanclub, limit)
+                time.sleep(random.uniform(1, 3))
             except KeyboardInterrupt:
                 raise
             except:
@@ -285,6 +291,7 @@ class FantiaDownloader:
             try:
                 fanclub = FantiaClub(fanclub_id)
                 self.download_fanclub(fanclub, limit)
+                time.sleep(random.uniform(1, 3))
             except:
                 if self.continue_on_error:
                     self.output("Encountered an error downloading fanclub. Skipping...\n")
@@ -317,6 +324,7 @@ class FantiaDownloader:
         for post_id in all_new_post_ids:
             try:
                 self.download_post(post_id)
+                time.sleep(random.uniform(1, 3))
             except KeyboardInterrupt:
                 raise
             except:
