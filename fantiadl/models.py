@@ -68,7 +68,7 @@ class FantiaClub:
 
 
 class FantiaDownloader:
-    def __init__(self, session_arg, chunk_size=1024 * 1024 * 5, dump_metadata=False, parse_for_external_links=False, download_thumb=False, directory=None, quiet=True, continue_on_error=False, use_server_filenames=False, mark_incomplete_posts=False, month_limit=None, exclude_file=None, db_path=None, db_bypass_post_check=False):
+    def __init__(self, session_arg, chunk_size=1024 * 1024 * 5, dump_metadata=False, parse_for_external_links=False, download_thumb=False, directory=None, quiet=True, continue_on_error=False, use_server_filenames=False, mark_incomplete_posts=False, month_limit=None, exclude_file=None, db_path=None, db_bypass_post_check=False, request_timeout=(10, 30)):
         # self.email = email
         # self.password = password
         self.session_arg = session_arg
@@ -86,6 +86,7 @@ class FantiaDownloader:
         self.exclusions = []
         self.db = FantiaDlDatabase(db_path)
         self.db_bypass_post_check = db_bypass_post_check
+        self.request_timeout = request_timeout
 
         self.initialize_session()
         self.login()
@@ -131,7 +132,7 @@ class FantiaDownloader:
             login_cookie = requests.cookies.create_cookie(domain=DOMAIN, name="_session_id", value=self.session_arg)
             self.session.cookies.set_cookie(login_cookie)
 
-        check_user = self.session.get(ME_API)
+        check_user = self.session.get(ME_API, timeout=self.request_timeout)
         if not (check_user.ok or check_user.status_code == 304):
             sys.exit("Error: Invalid session. Please verify your session cookie")
 
@@ -169,7 +170,7 @@ class FantiaDownloader:
 
     def process_content_type(self, url):
         """Process the Content-Type from a request header and use it to build a filename."""
-        url_header = self.session.head(url, allow_redirects=True)
+        url_header = self.session.head(url, allow_redirects=True, timeout=self.request_timeout)
         mimetype = url_header.headers["Content-Type"]
         extension = guess_extension(mimetype, url)
         return extension
@@ -196,7 +197,7 @@ class FantiaDownloader:
 
     def download_fanclub_metadata(self, fanclub):
         """Download fanclub header, icon, and custom background."""
-        response = self.session.get(FANCLUB_API.format(fanclub.id))
+        response = self.session.get(FANCLUB_API.format(fanclub.id), timeout=self.request_timeout)
         response.raise_for_status()
         fanclub_json = json.loads(response.text)
 
@@ -248,7 +249,7 @@ class FantiaDownloader:
 
     def download_followed_fanclubs(self, limit=0):
         """Download all followed fanclubs."""
-        response = self.session.get(FANCLUBS_FOLLOWING_API)
+        response = self.session.get(FANCLUBS_FOLLOWING_API, timeout=self.request_timeout)
         response.raise_for_status()
         fanclub_ids = json.loads(response.text)["fanclub_ids"]
 
@@ -273,7 +274,7 @@ class FantiaDownloader:
         page_number = 1
         self.output("Collecting paid fanclubs...\n")
         while True:
-            response = self.session.get(FANCLUBS_PAID_HTML.format(page_number))
+            response = self.session.get(FANCLUBS_PAID_HTML.format(page_number), timeout=self.request_timeout)
             response.raise_for_status()
             response_page = BeautifulSoup(response.text, "html.parser")
             fanclub_links = response_page.select("div.mb-5-children > div:nth-of-type(1) a[href^=\"/fanclubs\"]")
@@ -308,7 +309,7 @@ class FantiaDownloader:
         self.output("Downloading {} new posts...\n".format(post_limit))
 
         while has_next and not len(all_new_post_ids) >= post_limit:
-            response = self.session.get(TIMELINES_API.format(page_number))
+            response = self.session.get(TIMELINES_API.format(page_number), timeout=self.request_timeout)
             response.raise_for_status()
             json_response = json.loads(response.text)
 
@@ -342,7 +343,7 @@ class FantiaDownloader:
         page_number = 1
         self.output("Collecting fanclub posts...\n")
         while True:
-            response = self.session.get(FANCLUB_POSTS_HTML.format(fanclub.id, page_number))
+            response = self.session.get(FANCLUB_POSTS_HTML.format(fanclub.id, page_number), timeout=self.request_timeout)
             response.raise_for_status()
             response_page = BeautifulSoup(response.text, "html.parser")
             posts = response_page.select("div.post")
@@ -384,7 +385,7 @@ class FantiaDownloader:
 
         for attempt in range(3):
             try:
-                request = self.session.get(url, stream=True, timeout=(30, 60))
+                request = self.session.get(url, stream=True, timeout=self.request_timeout)
                 if request.status_code == 404:
                     self.output("Download URL returned 404. Skipping...\n")
                     return
@@ -527,7 +528,7 @@ class FantiaDownloader:
 
         self.output("Downloading post {}...\n".format(post_id))
 
-        post_html_response = self.session.get(POST_URL.format(post_id))
+        post_html_response = self.session.get(POST_URL.format(post_id), timeout=self.request_timeout)
         post_html_response.raise_for_status()
         post_html = BeautifulSoup(post_html_response.text, "html.parser")
         csrf_token = post_html.select_one("meta[name=\"csrf-token\"]")["content"]
@@ -535,7 +536,7 @@ class FantiaDownloader:
         response = self.session.get(POST_API.format(post_id), headers={
             "X-CSRF-Token": csrf_token,
             "X-Requested-With": "XMLHttpRequest"
-        })
+        }, timeout=self.request_timeout)
         response.raise_for_status()
         post_json = json.loads(response.text)["post"]
 
