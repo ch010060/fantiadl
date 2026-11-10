@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter, Retry
 import requests
 
-from datetime import datetime as dt
+from datetime import datetime as dt, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import unquote
 from urllib.parse import urljoin
@@ -68,7 +68,7 @@ class FantiaClub:
 
 
 class FantiaDownloader:
-    def __init__(self, session_arg, chunk_size=1024 * 1024 * 5, dump_metadata=False, parse_for_external_links=False, download_thumb=False, directory=None, quiet=True, continue_on_error=False, use_server_filenames=False, mark_incomplete_posts=False, month_limit=None, exclude_file=None, db_path=None, db_bypass_post_check=False, request_timeout=(10, 30)):
+    def __init__(self, session_arg, chunk_size=1024 * 1024 * 5, dump_metadata=False, parse_for_external_links=False, download_thumb=False, directory=None, quiet=True, continue_on_error=False, use_server_filenames=False, mark_incomplete_posts=False, month_limit=None, exclude_file=None, db_path=None, db_bypass_post_check=False, request_timeout=(10, 30), days=None):
         # self.email = email
         # self.password = password
         self.session_arg = session_arg
@@ -82,6 +82,7 @@ class FantiaDownloader:
         self.use_server_filenames = use_server_filenames
         self.mark_incomplete_posts = mark_incomplete_posts
         self.month_limit = dt.strptime(month_limit, "%Y-%m") if month_limit else None
+        self.since = dt.now() - timedelta(days=days) if days else None
         self.exclude_file = exclude_file
         self.exclusions = []
         self.db = FantiaDlDatabase(db_path)
@@ -348,16 +349,20 @@ class FantiaDownloader:
             response_page = BeautifulSoup(response.text, "html.parser")
             posts = response_page.select("div.post")
             new_post_ids = []
+            older_reached = False
             for post in posts:
                 link = post.select_one("a.link-block")["href"]
                 post_id = link.lstrip(POST_RELATIVE_URL)
                 date_string = post.select_one(".post-date .mr-5").text if post.select_one(".post-date .mr-5") else post.select_one(".post-date").text
                 parsed_date = dt.strptime(date_string, "%Y-%m-%d %H:%M")
+                if self.since and parsed_date < self.since: # list is newest-first
+                    older_reached = True
+                    continue
                 if not self.month_limit or (parsed_date.year == self.month_limit.year and parsed_date.month == self.month_limit.month):
                     post_found = True
                     new_post_ids.append(post_id)
             all_posts += new_post_ids
-            if not posts or (not new_post_ids and post_found): # No new posts found and we've already collected a post
+            if not posts or older_reached or (not new_post_ids and post_found): # No new posts found and we've already collected a post
                 self.output("Collected {} posts.\n".format(len(all_posts)))
                 return all_posts
             else:
