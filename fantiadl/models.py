@@ -111,11 +111,11 @@ class FantiaDownloader:
             "Referer": BASE_URL
         })
         retries = Retry(
-            total=5,
-            connect=5,
-            read=5,
+            total=3,
+            connect=3,
+            read=2,
             status_forcelist=[429, 500, 502, 503, 504, 507, 508],
-            backoff_factor=2, # retry delay = {backoff factor} * (2 ** ({retry number} - 1))
+            backoff_factor=1, # retry delay = {backoff factor} * (2 ** ({retry number} - 1))
             raise_on_status=True
         )
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
@@ -383,14 +383,25 @@ class FantiaDownloader:
             self.output("URL already downloaded. Skipping...\n")
             return
 
-        for attempt in range(3):
+        base_filepath = filepath
+        incomplete_filename = None
+        attempts = 5
+        for attempt in range(attempts):
             try:
-                request = self.session.get(url, stream=True, timeout=self.request_timeout)
+                headers = {}
+                resume_from = os.path.getsize(incomplete_filename) if incomplete_filename and os.path.isfile(incomplete_filename) else 0
+                if resume_from:
+                    headers["Range"] = "bytes={}-".format(resume_from)
+                request = self.session.get(url, stream=True, timeout=self.request_timeout, headers=headers)
                 if request.status_code == 404:
                     self.output("Download URL returned 404. Skipping...\n")
                     return
+                if request.status_code == 416: # .part is stale/oversized, start over
+                    os.remove(incomplete_filename)
+                    continue
                 request.raise_for_status()
 
+                filepath = base_filepath
                 # Handle redirects so we can properly catch an excluded filename
                 # Attachments typically route from fantia.jp/posts/#/download/#
                 # Images typically are served directly from cc.fantia.jp
@@ -405,29 +416,36 @@ class FantiaDownloader:
                         filepath = os.path.join(os.path.dirname(filepath), server_filename)
 
                 if not use_server_filename and append_server_extension:
-                    filepath += guess_extension(request.headers["Content-Type"], url)
+                    filepath += guess_extension(request.headers.get("Content-Type", ""), url)
 
-                file_size = int(request.headers["Content-Length"])
-                if os.path.isfile(filepath) and os.stat(filepath).st_size == file_size:
-                    self.output("File found (skipping): {}\n".format(filepath))
-                    self.db.insert_url(url_path)
-                    return
-
-                self.output("File: {}\n".format(filepath))
                 incomplete_filename = filepath + ".part"
+                resumed = request.status_code == 206
+                if resumed:
+                    file_size = int(request.headers["Content-Range"].rsplit("/", 1)[1])
+                    downloaded = resume_from
+                    self.output("Resuming at {} / {} bytes: {}\n".format(downloaded, file_size, filepath))
+                else:
+                    file_size = int(request.headers.get("Content-Length", 0))
+                    downloaded = 0
+                    if file_size and os.path.isfile(filepath) and os.stat(filepath).st_size == file_size:
+                        self.output("File found (skipping): {}\n".format(filepath))
+                        self.db.insert_url(url_path)
+                        return
+                    self.output("File: {}\n".format(filepath))
 
-                downloaded = 0
-                with open(incomplete_filename, "wb") as file:
+                with open(incomplete_filename, "ab" if resumed else "wb") as file:
                     for chunk in request.iter_content(self.chunk_size):
                         downloaded += len(chunk)
                         file.write(chunk)
-                        done = int(25 * downloaded / file_size)
-                        percent = int(100 * downloaded / file_size)
-                        self.output("\r|{0}{1}| {2}% ".format("\u2588" * done, " " * (25 - done), percent))
+                        if file_size:
+                            done = int(25 * downloaded / file_size)
+                            percent = int(100 * downloaded / file_size)
+                            self.output("\r|{0}{1}| {2}% ".format("\u2588" * done, " " * (25 - done), percent))
                 self.output("\n")
 
-                if downloaded != file_size:
-                    raise Exception("Downloaded file size mismatch (expected {}, got {})".format(file_size, downloaded))
+                if file_size and downloaded != file_size:
+                    # keep .part so the next attempt resumes via Range
+                    raise requests.exceptions.ConnectionError("Downloaded file size mismatch (expected {}, got {})".format(file_size, downloaded))
 
                 if os.path.exists(filepath):
                     os.remove(filepath)
@@ -435,24 +453,20 @@ class FantiaDownloader:
 
                 self.db.insert_url(url_path)
 
-                modification_time_string = request.headers["Last-Modified"]
-                modification_time = int(dt.strptime(modification_time_string, "%a, %d %b %Y %H:%M:%S %Z").timestamp())
-                if modification_time:
-                    access_time = int(time.time())
-                    os.utime(filepath, times=(access_time, modification_time))
-                
-                break # Break out of the retry loop if the download is successful
+                modification_time_string = request.headers.get("Last-Modified")
+                if modification_time_string:
+                    modification_time = int(dt.strptime(modification_time_string, "%a, %d %b %Y %H:%M:%S %Z").timestamp())
+                    os.utime(filepath, times=(int(time.time()), modification_time))
+                return
             except requests.exceptions.RequestException as e:
-                self.output(f"\nDownload failed on attempt {attempt + 1}/3: {e}\n")
-                if attempt == 2:
-                    self.output("All retry attempts failed. Skipping file...\n")
-                    return
+                self.output(f"\nDownload failed on attempt {attempt + 1}/{attempts}: {e}\n")
+                time.sleep(min(2 ** attempt, 10))
+        self.output("All retry attempts failed. Skipping file (partial kept as .part)...\n")
 
     def download_photo(self, photo_url, photo_counter, gallery_directory):
         """Download a photo to the post's directory."""
-        extension = self.process_content_type(photo_url)
-        filename = os.path.join(gallery_directory, str(photo_counter) + extension) if gallery_directory else str()
-        self.perform_download(photo_url, filename, use_server_filename=self.use_server_filenames)
+        filename = os.path.join(gallery_directory, str(photo_counter)) if gallery_directory else str()
+        self.perform_download(photo_url, filename, use_server_filename=self.use_server_filenames, append_server_extension=True)
 
     def download_file(self, download_url, filename, post_directory):
         """Download a file to the post's directory."""
@@ -515,9 +529,8 @@ class FantiaDownloader:
 
     def download_thumbnail(self, thumb_url, post_directory):
         """Download a thumbnail to the post's directory."""
-        extension = self.process_content_type(thumb_url)
-        filename = os.path.join(post_directory, "thumb" + extension)
-        self.perform_download(thumb_url, filename, use_server_filename=self.use_server_filenames)
+        filename = os.path.join(post_directory, "thumb")
+        self.perform_download(thumb_url, filename, use_server_filename=self.use_server_filenames, append_server_extension=True)
 
     def download_post(self, post_id):
         """Download a post to its own directory."""
